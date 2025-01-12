@@ -5,6 +5,10 @@ pub const KeyEventType = event.KeyEventType;
 pub const ResizeEvent = event.ResizeEvent;
 pub const KeyModifiers = event.KeyModifiers;
 
+pub const anchors = @import("anchors.zig");
+pub const VerticalAnchor = anchors.VerticalAnchor;
+pub const HorizontalAnchor = anchors.HorizontalAnchor;
+
 pub const attributes = @import("attributes.zig");
 pub const Attributes = attributes.Attributes;
 
