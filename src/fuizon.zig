@@ -13,6 +13,9 @@ pub const Color = color.Color;
 pub const RgbColor = color.RgbColor;
 pub const AnsiColor = color.AnsiColor;
 
+pub const style = @import("style.zig");
+pub const Style = style.Style;
+
 test "root" {
     try @import("std").testing.expect(true);
 }
