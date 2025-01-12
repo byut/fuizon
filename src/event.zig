@@ -3,6 +3,22 @@ const c = @cImport({
     @cInclude("crossterm_ffi/event.h");
 });
 
+// zig fmt: off
+pub const KeyModifiers = struct {
+    pub const NONE:     u16 = 0;
+    pub const SHIFT:    u16 = 1 << 0;
+    pub const CONTROL:  u16 = 1 << 1;
+    pub const ALT:      u16 = 1 << 2;
+    pub const SUPER:    u16 = 1 << 3;
+    pub const HYPER:    u16 = 1 << 4;
+    pub const META:     u16 = 1 << 5;
+    pub const KEYPAD:   u16 = 1 << 6;
+    pub const CAPS:     u16 = 1 << 7;
+    pub const NUM_LOCK: u16 = 1 << 8;
+    pub const ALL:      u16 = 0x1ff;
+};
+// zig fmt: on
+
 pub const KeyEventType = enum(u8) {
     char = 0,
     backspace,
