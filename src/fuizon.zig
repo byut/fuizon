@@ -20,6 +20,10 @@ pub const AnsiColor = color.AnsiColor;
 pub const style = @import("style.zig");
 pub const Style = style.Style;
 
+pub const frame = @import("frame.zig");
+pub const Frame = frame.Frame;
+pub const FrameCell = frame.FrameCell;
+
 test "root" {
     try @import("std").testing.expect(true);
 }
