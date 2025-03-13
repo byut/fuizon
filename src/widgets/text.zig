@@ -1,22 +1,17 @@
 const std = @import("std");
 const fuizon = @import("../fuizon.zig");
 
-const Area = fuizon.area.Area;
-const Frame = fuizon.frame.Frame;
-const FrameCell = fuizon.frame.FrameCell;
-
 const Container = fuizon.widgets.container.Container;
 const Borders = fuizon.widgets.container.Borders;
 
 const Style = fuizon.style.Style;
 const Alignment = fuizon.style.Alignment;
 
-pub const Character = struct {
-    code: u21,
-    style: Style = .{},
-};
+const Area = fuizon.area.Area;
+const Frame = fuizon.frame.Frame;
+const FrameCell = fuizon.frame.FrameCell;
 
-/// Specifies how to wrap a line if it exceeds the content width.
+/// Specifies how to wrap lines if they exceeds the content width.
 pub const Wrap = enum {
     /// Instructs the wrapper implementation to wrap lines on a per-character basis.
     ///
@@ -25,295 +20,561 @@ pub const Wrap = enum {
     character,
 };
 
-pub const Line = struct {
-    character_list: std.ArrayList(Character),
-    alignment: Alignment = .start,
+pub const Span = struct {
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    style: Style = .{},
 
-    /// Specifies how to wrap a line if it exceeds the content width.
-    ///
-    /// At the moment, the wrapper implementation disregards this setting and
-    /// wraps all lines on a per-character basis.
-    wrap: Wrap = .character,
-
-    frame: Frame,
-    content_width: u16,
-
-    //
-
-    /// Inserts a character into the line at the specified position.
-    pub fn insert(self: *Line, index: usize, character: Character) std.mem.Allocator.Error!void {
-        try self.character_list.insert(index, character);
-        try self.rewrap();
-    }
-
-    /// Appends a character to the line.
-    pub fn append(self: *Line, character: Character) std.mem.Allocator.Error!void {
-        return self.insert(self.character_list.items.len, character);
-    }
-
-    /// Prepends a character to the line.
-    pub fn prepend(self: *Line, character: Character) std.mem.Allocator.Error!void {
-        return self.insert(0, character);
-    }
-
-    //
-
-    /// Removes a character from the line from the specified position.
-    pub fn remove(self: *Line, index: usize) std.mem.Allocator.Error!void {
-        _ = self.character_list.orderedRemove(index);
-        try self.rewrap();
-    }
-
-    /// Removes the first character in the line.
-    pub fn removeFirst(self: *Line) std.mem.Allocator.Error!void {
-        if (self.character_list.items.len == 0)
-            return;
-        return self.remove(0);
-    }
-
-    /// Removes the last character in the line.
-    pub fn removeLast(self: *Line) std.mem.Allocator.Error!void {
-        if (self.character_list.items.len == 0)
-            return;
-        return self.remove(self.length() - 1);
-    }
-
-    //
-
-    /// Returns the length of the line.
-    pub fn length(self: Line) usize {
-        return self.character_list.items.len;
-    }
-
-    //
-
-    fn init(allocator: std.mem.Allocator) Line {
+    /// Initializes an empty span.
+    pub fn init(allocator: std.mem.Allocator) Span {
         return .{
-            .character_list = std.ArrayList(Character).init(allocator),
-            .frame = Frame.init(allocator),
-            .content_width = 0,
+            .allocator = allocator,
+            .content = "",
+            .style = .{},
         };
     }
 
-    fn deinit(self: Line) void {
-        self.character_list.deinit();
-        self.frame.deinit();
+    test "init()" {
+        const span = Span.init(std.testing.allocator);
+        defer span.deinit();
     }
 
-    // TODO: add the offset parameter to avoid
-    //       rewrapping the entire line when it is not necessary.
-    fn rewrap(self: *Line) std.mem.Allocator.Error!void {
-        if (self.content_width == 0) {
-            try self.frame.resize(0, 0);
-            return;
-        }
+    /// Initializes a new span with the given content using the provided styling.
+    pub fn initContent(
+        allocator: std.mem.Allocator,
+        content: []const u8,
+        style: Style,
+    ) std.mem.Allocator.Error!Span {
+        var span = Span.init(allocator);
+        try span.setContent(content);
+        span.style = style;
+        return span;
+    }
 
-        var line_width: u16 = 0;
-        for (self.character_list.items) |_| {
-            // TODO: count character width. For now, we'll assume all
-            //       characters can fit in a single frame cell.
-            line_width += 1;
-        }
+    test "initContent()" {
+        const span = try Span.initContent(std.testing.allocator, "content", .{});
+        defer span.deinit();
+    }
 
-        if (line_width % self.content_width != 0) {
-            try self.frame.resize(self.content_width, (line_width / self.content_width) + 1);
-        } else {
-            try self.frame.resize(self.content_width, line_width / self.content_width);
-        }
+    /// Updates span content.
+    pub fn setContent(
+        self: *Span,
+        content: []const u8,
+    ) std.mem.Allocator.Error!void {
+        const new_content = try self.allocator.dupe(u8, content);
+        errdefer comptime unreachable;
 
-        self.frame.fill(self.frame.area, FrameCell.empty);
+        if (self.content.len > 0)
+            self.allocator.free(self.content);
+        self.content = new_content;
+    }
 
-        var it: usize = 0;
-        for (self.character_list.items) |character| {
-            if (it % self.content_width == 0) {
-                it += switch (self.alignment) {
-                    // zig fmt: off
-                    .start  => 0,
-                    .center => (self.content_width -| (line_width - it)) / 2,
-                    .end    => (self.content_width -| (line_width - it)),
-                    // zig fmt: on
-                };
-            }
+    test "setContent()" {
+        var span = Span.init(std.testing.allocator);
+        defer span.deinit();
+        try span.setContent("content");
+        try std.testing.expectEqualStrings("content", span.content);
+    }
 
-            // TODO: set the actual character width instead of 1.
-            self.frame.buffer[it].width = 1;
-            self.frame.buffer[it].content = character.code;
-            self.frame.buffer[it].style = character.style;
+    /// Makes a copy of the span using the same allocator.
+    pub fn clone(self: Span) std.mem.Allocator.Error!Span {
+        return Span.initContent(
+            self.allocator,
+            self.content,
+            self.style,
+        );
+    }
 
-            it += self.frame.buffer[it].width;
-        }
+    test "clone()" {
+        const span = try Span.initContent(std.testing.allocator, "content", .{ .foreground_color = .blue });
+        defer span.deinit();
+        const copy = try span.clone();
+        defer copy.deinit();
+
+        try std.testing.expectEqualDeep(span.style, copy.style);
+        try std.testing.expectEqualStrings(span.content, copy.content);
+        try std.testing.expect(span.content.ptr != copy.content.ptr);
+    }
+
+    /// Deinitializes the span.
+    pub fn deinit(self: Span) void {
+        if (self.content.len > 0)
+            self.allocator.free(self.content);
     }
 };
 
-pub const LineParameters = struct {
+pub const Line = struct {
+    allocator: std.mem.Allocator,
     alignment: Alignment = .start,
-    style: Style = .{},
-    wrap: Wrap = .character,
+    span_list: std.ArrayList(Span),
+
+    /// Initializes an empty line with custom alignment.
+    pub fn init(allocator: std.mem.Allocator, alignment: Alignment) Line {
+        var line: Line = undefined;
+        line.allocator = allocator;
+        line.alignment = alignment;
+        line.span_list = std.ArrayList(Span).init(allocator);
+        return line;
+    }
+
+    test "init() with left alignment" {
+        const line = Line.init(std.testing.allocator, .start);
+        defer line.deinit();
+
+        try std.testing.expectEqual(.start, line.alignment);
+    }
+
+    test "init() with center alignment" {
+        const line = Line.init(std.testing.allocator, .center);
+        defer line.deinit();
+
+        try std.testing.expectEqual(.center, line.alignment);
+    }
+
+    test "init() with right alignment" {
+        const line = Line.init(std.testing.allocator, .end);
+        defer line.deinit();
+
+        try std.testing.expectEqual(.end, line.alignment);
+    }
+
+    /// Initializes a new line from the provided spans.
+    pub fn fromSpans(
+        allocator: std.mem.Allocator,
+        alignment: Alignment,
+        spans: []const Span,
+    ) std.mem.Allocator.Error!Line {
+        var line = Line.init(allocator, alignment);
+        errdefer line.deinit();
+        for (spans) |span|
+            try line.span_list.append(span);
+        return line;
+    }
+
+    test "fromSpans()" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const spans = [_]Span{
+            try Span.initContent(allocator, "first", .{}),
+            try Span.initContent(allocator, "second", .{}),
+            try Span.initContent(allocator, "third", .{}),
+        };
+
+        const line = try Line.fromSpans(std.testing.allocator, undefined, &spans);
+        defer line.deinit();
+
+        try std.testing.expectEqualSlices(Span, &spans, line.span_list.items);
+    }
+
+    /// Initializes a new line with custom alignment and the given string using
+    /// the provided styling.
+    pub fn fromString(
+        allocator: std.mem.Allocator,
+        alignment: Alignment,
+        content: []const u8,
+        style: Style,
+    ) std.mem.Allocator.Error!Line {
+        const span = try Span.initContent(allocator, content, style);
+        errdefer span.deinit();
+        return Line.fromSpans(allocator, alignment, &.{span});
+    }
+
+    test "fromString()" {
+        const line = try Line.fromString(std.testing.allocator, undefined, "content", .{ .foreground_color = .blue });
+        defer line.deinit();
+
+        try std.testing.expectEqual(1, line.span_list.items.len);
+        try std.testing.expectEqualStrings("content", line.span_list.items[0].content);
+        try std.testing.expectEqualDeep(Style{ .foreground_color = .blue }, line.span_list.items[0].style);
+    }
+
+    /// Makes a copy of the line using the same allocator.
+    pub fn clone(self: Line) std.mem.Allocator.Error!Line {
+        var line = Line.init(self.allocator, self.alignment);
+        errdefer line.deinit();
+        for (self.span_list.items) |span| {
+            const copy = try span.clone();
+            errdefer copy.deinit();
+            try line.span_list.append(copy);
+        }
+        return line;
+    }
+
+    test "clone()" {
+        const line = try Line.fromString(std.testing.allocator, undefined, "content", .{ .foreground_color = .blue });
+        defer line.deinit();
+        const copy = try line.clone();
+        defer copy.deinit();
+
+        try std.testing.expectEqual(line.span_list.items.len, copy.span_list.items.len);
+        try std.testing.expectEqualStrings(line.span_list.items[0].content, copy.span_list.items[0].content);
+        try std.testing.expectEqualDeep(line.span_list.items[0].style, copy.span_list.items[0].style);
+        try std.testing.expect(line.span_list.items.ptr != copy.span_list.items.ptr);
+    }
+
+    /// Deinitializes the line.
+    pub fn deinit(self: Line) void {
+        for (self.span_list.items) |span|
+            span.deinit();
+        self.span_list.deinit();
+    }
+
+    /// Returns the number of characters in the line.
+    pub fn length(self: Line) usize {
+        var it = self.iterator();
+        var counter: usize = 0;
+        while (it.next()) |item| : (counter += item.width) {}
+        return counter;
+    }
+
+    test "length() on empty line" {
+        const line = Line.init(std.testing.allocator, undefined);
+        defer line.deinit();
+
+        try std.testing.expectEqual(0, line.length());
+    }
+
+    test "length() [1]" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const line = try Line.fromSpans(std.testing.allocator, undefined, &.{
+            try Span.initContent(allocator, "söme cöntent ", .{}),
+            try Span.initContent(allocator, "", .{}),
+            Span.init(allocator),
+            try Span.initContent(allocator, "with unicöde cödepöints", .{}),
+        });
+        defer line.deinit();
+
+        try std.testing.expectEqual(36, line.length());
+    }
+
+    /// Initializes the line iterator.
+    pub fn iterator(self: *const Line) Iterator {
+        var it: Iterator = undefined;
+        it.line = self;
+        it.current_span = 0;
+
+        // zig fmt: off
+        const content: []const u8 =
+            if (it.line.span_list.items.len > 0)
+                it.line.span_list.items[0].content
+            else
+                "";
+        // zig fmt: on
+
+        it.current_character = (std.unicode.Utf8View.init(content) catch unreachable).iterator();
+
+        return it;
+    }
+
+    pub const Iterator = struct {
+        line: *const Line,
+        current_span: usize,
+        current_character: std.unicode.Utf8Iterator,
+
+        pub fn next(self: *Iterator) ?FrameCell {
+            if (self.current_span == self.line.span_list.items.len)
+                return null;
+
+            while (true) {
+                if (self.current_character.nextCodepoint()) |codepoint| {
+                    return .{
+                        .width = 1,
+                        .content = codepoint,
+                        .style = self.line.span_list.items[self.current_span].style,
+                    };
+                }
+
+                self.current_span += 1;
+                if (self.current_span == self.line.span_list.items.len)
+                    break;
+                // zig fmt: off
+                self.current_character =
+                    (std.unicode.Utf8View.init(
+                        self.line.span_list.items[self.current_span].content,
+                        ) catch unreachable).iterator();
+                // zig fmt: on
+            }
+
+            return null;
+        }
+    };
 };
 
 pub const Text = struct {
     allocator: std.mem.Allocator,
-    container: Container = .{},
     line_list: std.ArrayList(Line),
-    content_width: u16,
 
-    /// Initializes a new Text instance with the given allocator.
+    /// Initializes an empty block of text.
     pub fn init(allocator: std.mem.Allocator) Text {
         var text: Text = undefined;
         text.allocator = allocator;
-        text.container = Container{};
         text.line_list = std.ArrayList(Line).init(allocator);
-        text.content_width = 0;
         return text;
     }
 
-    /// Deinitializes the Text instance.
+    test "init()" {
+        const text = Text.init(std.testing.allocator);
+        defer text.deinit();
+    }
+
+    /// Initializes a new text by merging the provided lines.
+    pub fn initLines(
+        allocator: std.mem.Allocator,
+        lines: []const Line,
+    ) std.mem.Allocator.Error!Text {
+        var text = Text.init(allocator);
+        errdefer text.deinit();
+        for (lines) |line|
+            try text.line_list.append(line);
+        return text;
+    }
+
+    test "initLines()" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const lines = [_]Line{
+            try Line.fromSpans(allocator, .end, &.{
+                try Span.initContent(allocator, "content", .{}),
+                Span.init(allocator),
+                try Span.initContent(allocator, "", .{ .background_color = .green }),
+            }),
+            Line.init(allocator, .center),
+            try Line.fromString(allocator, .start, "string", .{}),
+        };
+
+        const text = try Text.initLines(std.testing.allocator, &lines);
+        defer text.deinit();
+
+        try std.testing.expectEqualSlices(Line, &lines, text.line_list.items);
+    }
+
+    /// Makes a copy of the text using the same allocator.
+    pub fn clone(self: Text) std.mem.Allocator.Error!Text {
+        var text = Text.init(self.allocator);
+        errdefer text.deinit();
+        for (self.line_list.items) |line| {
+            const copy = try line.clone();
+            errdefer copy.deinit();
+            try text.line_list.append(copy);
+        }
+        return text;
+    }
+
+    test "clone()" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const text = try Text.initLines(std.testing.allocator, &.{try Line.fromString(allocator, .start, "content", .{ .foreground_color = .red })});
+        defer text.deinit();
+
+        const copy = try text.clone();
+        defer copy.deinit();
+
+        try std.testing.expectEqual(text.line_list.items.len, copy.line_list.items.len);
+        try std.testing.expectEqualDeep(text.line_list.items[0], copy.line_list.items[0]);
+        try std.testing.expect(text.line_list.items.ptr != copy.line_list.items.ptr);
+    }
+
+    /// Deinitializes the block of text.
     pub fn deinit(self: Text) void {
         for (self.line_list.items) |line|
             line.deinit();
         self.line_list.deinit();
     }
+};
 
-    //
+//
 
-    /// Insert a new line into the block of text at the specified line number.
-    pub fn insert(
-        self: *Text,
-        index: usize,
-        content: []const u8,
-        params: LineParameters,
-    ) std.mem.Allocator.Error!void {
-        const line = try self.addOneAt(index);
+pub const Paragraph = struct {
+    allocator: std.mem.Allocator,
+    text_frames: []Frame,
+    text: Text,
 
-        line.* = Line.init(self.allocator);
-        errdefer line.deinit();
-        line.alignment = params.alignment;
-        line.wrap = params.wrap;
-        line.content_width = self.content_width;
+    container: Container,
 
-        var string_iterator = (std.unicode.Utf8View.init(content) catch unreachable).iterator();
-        while (string_iterator.nextCodepoint()) |codepoint|
-            try line.append(.{ .code = codepoint, .style = params.style });
+    /// Initializes a new Paragraph.
+    pub fn init(allocator: std.mem.Allocator) Paragraph {
+        var paragraph: Paragraph = undefined;
+        paragraph.allocator = allocator;
+        paragraph.text = Text.init(allocator);
+        paragraph.text_frames = &.{};
+        paragraph.container = .{};
+        return paragraph;
     }
 
-    /// Appends a new line to the block of text.
-    pub fn append(
-        self: *Text,
-        content: []const u8,
-        params: LineParameters,
-    ) std.mem.Allocator.Error!void {
-        return self.insert(self.line_list.items.len, content, params);
-    }
+    /// Deinitializes the Paragraph.
+    pub fn deinit(self: Paragraph) void {
+        for (self.text_frames) |text_frame|
+            text_frame.deinit();
+        if (self.text_frames.len > 0)
+            self.allocator.free(self.text_frames);
 
-    /// Prepends a new line to the block of text.
-    pub fn prepend(
-        self: *Text,
-        content: []const u8,
-        params: LineParameters,
-    ) std.mem.Allocator.Error!void {
-        return self.insert(0, content, params);
+        self.text.deinit();
     }
 
     //
 
-    /// Removes a line from the block of text at the specified position.
-    pub fn remove(self: *Text, index: usize) void {
-        self.line_list.items[index].deinit();
-        _ = self.line_list.orderedRemove(index);
-    }
-
-    /// Removes the first line from the block of text.
-    pub fn removeFirst(self: *Text) void {
-        if (self.line_list.items.len == 0)
-            return;
-        self.remove(0);
-    }
-
-    /// Removes the last line from the block of text.
-    pub fn removeLast(self: *Text) void {
-        if (self.line_list.items.len == 0)
-            return;
-        self.remove(self.length() - 1);
-    }
-
-    //
-
-    /// Returns the number of lines in the block of text.
-    pub fn length(self: Text) usize {
-        return self.line_list.items.len;
-    }
-
-    /// Calculates the total number of lines that the block of text would occupy
-    /// within the previously specified content width.
-    pub fn height(self: Text) usize {
-        var h: usize = 0;
-        for (self.line_list.items) |line| {
-            h += line.frame.area.height;
+    /// Returns the width required to fully render the paragraph.
+    pub fn width(self: Paragraph) u16 {
+        var max_width: u16 = 0;
+        for (self.text_frames) |text_frame| {
+            if (text_frame.area.width > max_width)
+                max_width = text_frame.area.width;
         }
-        return h;
+
+        // zig fmt: off
+        return max_width
+            + self.container.margin_left + self.container.margin_right
+            + (if (self.container.borders.contain(&.{.left}))  @as(u16, 1) else @as(u16, 0))
+            + (if (self.container.borders.contain(&.{.right})) @as(u16, 1) else @as(u16, 0));
+        // zig fmt: on
+    }
+
+    /// Returns the height required to fully render the paragraph.
+    pub fn height(self: Paragraph) u16 {
+        var h: u16 = 0;
+        for (self.text_frames) |text_frame|
+            h += text_frame.area.height;
+        // zig fmt: off
+        return h
+            + self.container.margin_top + self.container.margin_bottom
+            + (if (self.container.borders.contain(&.{.top}))    @as(u16, 1) else @as(u16, 0))
+            + (if (self.container.borders.contain(&.{.bottom})) @as(u16, 1) else @as(u16, 0));
+        // zig fmt: on
     }
 
     //
 
-    /// Sets the content width and rewraps the text.
-    ///
-    /// The provided content width may differ from the frame's area width.
-    /// However, if the content width exceeds the frame width, some content may
-    /// be lost during rendering.
-    pub fn setContentWidth(self: *Text, content_width: u16) std.mem.Allocator.Error!void {
-        self.content_width = content_width;
-        for (self.line_list.items) |*line| {
-            line.content_width = content_width;
-            try line.rewrap();
+    /// Adjusts the paragraph dimensions to fit the given text without wrapping.
+    pub fn fit(self: *Paragraph, source_text: Text) std.mem.Allocator.Error!void {
+        const text = try source_text.clone();
+        errdefer text.deinit();
+        const text_frames = try self.allocator.alloc(Frame, text.line_list.items.len);
+        errdefer self.allocator.free(text_frames);
+        for (text_frames) |*text_frame| text_frame.* = Frame.init(self.allocator);
+        errdefer for (text_frames) |text_frame| text_frame.deinit();
+
+        for (text_frames, 0..) |*text_frame, i| {
+            try text_frame.resize(@intCast(text.line_list.items[i].length()), 1);
+            var x: u16 = 0;
+            var it = text.line_list.items[i].iterator();
+            while (it.next()) |item| : (x += item.width)
+                text_frame.index(x, 0).* = item;
         }
+
+        errdefer comptime unreachable;
+
+        for (self.text_frames) |text_frame|
+            text_frame.deinit();
+        if (self.text_frames.len > 0)
+            self.allocator.free(self.text_frames);
+        self.text.deinit();
+
+        self.text_frames = text_frames;
+        self.text = text;
+    }
+
+    /// Adjusts the paragraph dimensions to fit the given text within the
+    /// specified width. Text is thereby wrapped based on the selected method.
+    pub fn wrap(
+        self: *Paragraph,
+        source_text: Text,
+        content_width: u16,
+        method: Wrap,
+    ) std.mem.Allocator.Error!void {
+        // as there is currently only one method, we can ignore its
+        // specification here.
+        _ = method;
+
+        const text = try source_text.clone();
+        errdefer text.deinit();
+        const text_frames = try self.allocator.alloc(Frame, text.line_list.items.len);
+        errdefer self.allocator.free(text_frames);
+        for (text_frames) |*text_frame| text_frame.* = Frame.init(self.allocator);
+        errdefer for (text_frames) |text_frame| text_frame.deinit();
+
+        e: {
+            if (content_width == 0) {
+                for (text_frames) |*text_frame|
+                    try text_frame.resize(0, 0);
+
+                break :e;
+            }
+
+            for (text_frames, 0..) |*text_frame, i| {
+                const line = text.line_list.items[i];
+                const line_width = line.length();
+
+                try text_frame.resize(
+                    content_width,
+                    @intFromFloat(@ceil(@as(f64, @floatFromInt(line_width)) / @as(f64, @floatFromInt(content_width)))),
+                );
+
+                var buffer_iterator: usize = 0;
+                var line_iterator = line.iterator();
+                while (line_iterator.next()) |cell| : (buffer_iterator += cell.width) {
+                    if (buffer_iterator % content_width == 0) {
+                        buffer_iterator += switch (line.alignment) {
+                            // zig fmt: off
+                            .start  => 0,
+                            .center => (content_width -| (line_width - buffer_iterator)) / 2,
+                            .end    => (content_width -| (line_width - buffer_iterator)),
+                            // zig fmt: on
+                        };
+                    }
+                    text_frame.buffer[buffer_iterator] = cell;
+                }
+            }
+        }
+
+        errdefer comptime unreachable;
+
+        for (self.text_frames) |text_frame|
+            text_frame.deinit();
+        if (self.text_frames.len > 0)
+            self.allocator.free(self.text_frames);
+        self.text.deinit();
+
+        self.text_frames = text_frames;
+        self.text = text;
     }
 
     //
 
-    /// Renders the block of text within the section of the specified frame,
-    /// as defined by the provided area.
-    ///
-    /// The provided frame width may differ from the previously specified
-    /// content width of the text. However, if the content width exceeds the
-    /// frame width, some content may be lost during rendering.
-    pub fn render(
-        self: Text,
-        frame: *Frame,
-        area: Area,
-    ) void {
-        frame.fill(frame.area, .{ .width = 1, .content = ' ', .style = .{} });
+    /// Renders the block of text to the frame within the given area.
+    pub fn render(self: Paragraph, frame: *Frame, area: Area) void {
         self.container.render(frame, area);
         const inner_area = self.container.inner(area);
         var render_y = inner_area.top();
-        for (self.line_list.items) |line| {
-            const f = &line.frame;
-            for (f.area.top()..f.area.bottom()) |y| {
+        for (self.text_frames, 0..) |text_frame, i| {
+            const line = self.text.line_list.items[i];
+            for (text_frame.area.top()..text_frame.area.bottom()) |y| {
                 if (render_y >= inner_area.bottom())
                     return;
                 var render_x = switch (line.alignment) {
                     // zig fmt: off
                     .start  => inner_area.left(),
-                    .center => inner_area.left() + (inner_area.width -| f.area.width) / 2,
-                    .end    => inner_area.left() + (inner_area.width -| f.area.width),
+                    .center => inner_area.left() + (inner_area.width -| text_frame.area.width) / 2,
+                    .end    => inner_area.left() + (inner_area.width -| text_frame.area.width),
                     // zig fmt: on
                 };
-                for (f.area.left()..f.area.right()) |x| {
+                for (text_frame.area.left()..text_frame.area.right()) |x| {
                     if (render_x >= inner_area.right())
                         break;
-                    frame.index(render_x, render_y).* = f.index(@intCast(x), @intCast(y)).*;
+                    frame.index(render_x, render_y).* = text_frame.index(@intCast(x), @intCast(y)).*;
                     render_x += 1;
                 }
                 render_y += 1;
             }
         }
-    }
-
-    //
-
-    fn addOneAt(self: *Text, index: usize) std.mem.Allocator.Error!*Line {
-        try self.line_list.insert(index, undefined);
-        errdefer _ = self.line_list.orderedRemove(index);
-        return &self.line_list.items[index];
     }
 };
 
@@ -321,7 +582,229 @@ pub const Text = struct {
 // Tests
 //
 
-test "render()" {
+test "fit()" {
+    const TestCase = struct {
+        const Self = @This();
+
+        id: usize,
+
+        content: []const []const u8,
+        content_alignment: Alignment,
+
+        borders: Borders = Borders.none,
+        margin_top: u16 = 0,
+        margin_bottom: u16 = 0,
+        margin_left: u16 = 0,
+        margin_right: u16 = 0,
+
+        expected: []const []const u8,
+
+        pub fn test_fn(self: Self) type {
+            return struct {
+                test {
+                    const expected_frame = try Frame.initContent(std.testing.allocator, self.expected, .{});
+                    defer expected_frame.deinit();
+
+                    var actual_frame = try Frame.initArea(std.testing.allocator, expected_frame.area);
+                    defer actual_frame.deinit();
+
+                    var text = Text.init(std.testing.allocator);
+                    defer text.deinit();
+                    for (self.content) |line|
+                        try text.line_list.append(try Line.fromString(
+                            std.testing.allocator,
+                            self.content_alignment,
+                            line,
+                            .{},
+                        ));
+
+                    var paragraph = Paragraph.init(std.testing.allocator);
+                    defer paragraph.deinit();
+                    paragraph.container.borders = self.borders;
+                    paragraph.container.margin_top = self.margin_top;
+                    paragraph.container.margin_bottom = self.margin_bottom;
+                    paragraph.container.margin_left = self.margin_left;
+                    paragraph.container.margin_right = self.margin_right;
+                    try paragraph.fit(text);
+                    paragraph.render(&actual_frame, .{
+                        .width = paragraph.width(),
+                        .height = paragraph.height(),
+                        .origin = actual_frame.area.origin,
+                    });
+
+                    try std.testing.expectEqualSlices(
+                        FrameCell,
+                        expected_frame.buffer,
+                        actual_frame.buffer,
+                    );
+                }
+            };
+        }
+    };
+
+    inline for ([_]TestCase{
+        .{
+            .id = 0,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .start,
+            .expected = &[_][]const u8{
+                "hello world              ",
+                "this is a multi-line text",
+            },
+        },
+        .{
+            .id = 1,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .center,
+            .expected = &[_][]const u8{
+                "       hello world       ",
+                "this is a multi-line text",
+            },
+        },
+        .{
+            .id = 2,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .end,
+            .expected = &[_][]const u8{
+                "              hello world",
+                "this is a multi-line text",
+            },
+        },
+        .{
+            .id = 3,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .end,
+            .margin_top = 1,
+            .expected = &[_][]const u8{
+                "                         ",
+                "              hello world",
+                "this is a multi-line text",
+            },
+        },
+        .{
+            .id = 4,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .end,
+            .margin_left = 1,
+            .expected = &[_][]const u8{
+                "               hello world",
+                " this is a multi-line text",
+            },
+        },
+        .{
+            .id = 5,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .end,
+            .margin_right = 1,
+            .expected = &[_][]const u8{
+                "              hello world ",
+                "this is a multi-line text ",
+            },
+        },
+        .{
+            .id = 6,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .end,
+            .margin_bottom = 1,
+            .expected = &[_][]const u8{
+                "              hello world",
+                "this is a multi-line text",
+                "                         ",
+            },
+        },
+        .{
+            .id = 7,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .start,
+            .borders = Borders.all,
+            .expected = &[_][]const u8{
+                "┌─────────────────────────┐",
+                "│hello world              │",
+                "│this is a multi-line text│",
+                "└─────────────────────────┘",
+            },
+        },
+        .{
+            .id = 8,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .center,
+            .borders = Borders.all,
+            .expected = &[_][]const u8{
+                "┌─────────────────────────┐",
+                "│       hello world       │",
+                "│this is a multi-line text│",
+                "└─────────────────────────┘",
+            },
+        },
+        .{
+            .id = 9,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .end,
+            .borders = Borders.all,
+            .expected = &[_][]const u8{
+                "┌─────────────────────────┐",
+                "│              hello world│",
+                "│this is a multi-line text│",
+                "└─────────────────────────┘",
+            },
+        },
+        .{
+            .id = 10,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .content_alignment = .center,
+            .margin_top = 1,
+            .margin_bottom = 1,
+            .margin_left = 1,
+            .margin_right = 1,
+            .borders = Borders.all,
+            .expected = &[_][]const u8{
+                "┌───────────────────────────┐",
+                "│                           │",
+                "│        hello world        │",
+                "│ this is a multi-line text │",
+                "│                           │",
+                "└───────────────────────────┘",
+            },
+        },
+    }) |test_case| {
+        _ = test_case.test_fn();
+    }
+}
+
+test "wrap()" {
     const TestCase = struct {
         const Self = @This();
 
@@ -351,15 +834,19 @@ test "render()" {
 
                     var text = Text.init(std.testing.allocator);
                     defer text.deinit();
-                    try text.setContentWidth(self.content_width);
-                    text.container.borders = self.borders;
+                    for (self.content) |line|
+                        try text.line_list.append(try Line.fromString(
+                            std.testing.allocator,
+                            self.content_alignment,
+                            line,
+                            .{},
+                        ));
 
-                    for (self.content) |line| try text.append(line, .{
-                        .wrap = self.content_wrap,
-                        .alignment = self.content_alignment,
-                    });
-
-                    text.render(&actual_frame, actual_frame.area);
+                    var paragraph = Paragraph.init(std.testing.allocator);
+                    defer paragraph.deinit();
+                    paragraph.container.borders = self.borders;
+                    try paragraph.wrap(text, self.content_width, self.content_wrap);
+                    paragraph.render(&actual_frame, actual_frame.area);
 
                     try std.testing.expectEqualSlices(
                         FrameCell,
@@ -674,117 +1161,77 @@ test "render()" {
                 "└───────────────┘",
             },
         },
+        .{
+            .id = 20,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .borders = Borders.all,
+            .content_alignment = .end,
+            .content_width = 0,
+            .expected = &[_][]const u8{
+                "┌┐",
+                "└┘",
+            },
+        },
+        .{
+            .id = 21,
+            .content = &[_][]const u8{
+                "hello world",
+                "this is a multi-line text",
+            },
+            .borders = Borders.none,
+            .content_alignment = .end,
+            .content_width = 0,
+            .expected = &[_][]const u8{
+                "",
+            },
+        },
+        .{
+            .id = 22,
+            .content = &[_][]const u8{},
+            .borders = Borders.all,
+            .content_alignment = .start,
+            .content_width = 5,
+            .expected = &[_][]const u8{
+                "┌─────┐",
+                "│     │",
+                "└─────┘",
+            },
+        },
+        .{
+            .id = 23,
+            .content = &[_][]const u8{},
+            .borders = Borders.none,
+            .content_alignment = .start,
+            .content_width = 5,
+            .expected = &[_][]const u8{
+                "     ",
+            },
+        },
+        .{
+            .id = 24,
+            .content = &[_][]const u8{},
+            .borders = Borders.all,
+            .content_alignment = .start,
+            .content_width = 0,
+            .expected = &[_][]const u8{
+                "┌┐",
+                "└┘",
+            },
+        },
+        .{
+            .id = 25,
+            .content = &[_][]const u8{},
+            .borders = Borders.none,
+            .content_alignment = .start,
+            .content_width = 0,
+            .expected = &[_][]const u8{
+                "",
+            },
+        },
     }) |test_case| {
         _ = test_case.test_fn();
     }
-}
-
-test "render() with different text alignments" {
-    const expected_frame = try Frame.initContent(std.testing.allocator, &[_][]const u8{
-        "left alignment",
-        "center alignme",
-        "      nt      ",
-        "right alignmen",
-        "             t",
-    }, .{});
-    defer expected_frame.deinit();
-
-    var actual_frame = try Frame.initArea(std.testing.allocator, expected_frame.area);
-    defer actual_frame.deinit();
-
-    var text = Text.init(std.testing.allocator);
-    defer text.deinit();
-    try text.setContentWidth(14);
-
-    try text.append("left alignment", .{ .alignment = .start });
-    try text.append("center alignment", .{ .alignment = .center });
-    try text.append("right alignment", .{ .alignment = .end });
-
-    text.render(&actual_frame, actual_frame.area);
-
-    try std.testing.expectEqualSlices(
-        FrameCell,
-        expected_frame.buffer,
-        actual_frame.buffer,
-    );
-}
-
-test "(text) insert() + remove()" {
-    const expected_frame = try Frame.initContent(std.testing.allocator, &[_][]const u8{
-        "0",
-        "1",
-        "2",
-        "3",
-    }, .{});
-    defer expected_frame.deinit();
-
-    var actual_frame = try Frame.initArea(std.testing.allocator, expected_frame.area);
-    defer actual_frame.deinit();
-
-    var text = Text.init(std.testing.allocator);
-    defer text.deinit();
-    try text.setContentWidth(14);
-
-    try text.append("1", .{});
-    try text.prepend("0", .{});
-    try text.append("3", .{});
-    try text.insert(2, "2", .{});
-
-    try text.prepend("-1", .{});
-    try text.append("NaN", .{});
-    try text.insert(1, "404", .{});
-
-    text.remove(1);
-    text.removeFirst();
-    text.removeLast();
-
-    text.render(&actual_frame, actual_frame.area);
-
-    try std.testing.expectEqual(4, text.length());
-    try std.testing.expectEqual(4, text.height());
-    try std.testing.expectEqualSlices(
-        FrameCell,
-        expected_frame.buffer,
-        actual_frame.buffer,
-    );
-}
-
-test "(line) insert() + remove()" {
-    const expected_frame = try Frame.initContent(std.testing.allocator, &[_][]const u8{
-        "0123",
-    }, .{});
-    defer expected_frame.deinit();
-
-    var actual_frame = try Frame.initArea(std.testing.allocator, expected_frame.area);
-    defer actual_frame.deinit();
-
-    var text = Text.init(std.testing.allocator);
-    defer text.deinit();
-    try text.setContentWidth(14);
-
-    try text.append("", .{});
-
-    const line = &text.line_list.items[0];
-
-    try line.append(.{ .code = '1' });
-    try line.prepend(.{ .code = '0' });
-    try line.append(.{ .code = '3' });
-    try line.insert(2, .{ .code = '2' });
-
-    try line.prepend(.{ .code = 5 });
-    try line.append(.{ .code = 9 });
-    try line.insert(1, .{ .code = 15 });
-
-    try line.remove(1);
-    try line.removeFirst();
-    try line.removeLast();
-
-    text.render(&actual_frame, actual_frame.area);
-
-    try std.testing.expectEqual(4, line.length());
-    try std.testing.expectEqualSlices(
-        FrameCell,
-        expected_frame.buffer,
-        actual_frame.buffer,
-    );
 }
