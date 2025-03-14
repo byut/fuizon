@@ -77,9 +77,9 @@ pub const Span = struct {
     }
 
     /// Makes a copy of the span using the same allocator.
-    pub fn clone(self: Span) std.mem.Allocator.Error!Span {
+    pub fn clone(self: Span, allocator: std.mem.Allocator) std.mem.Allocator.Error!Span {
         return Span.initContent(
-            self.allocator,
+            allocator,
             self.content,
             self.style,
         );
@@ -88,7 +88,7 @@ pub const Span = struct {
     test "clone()" {
         const span = try Span.initContent(std.testing.allocator, "content", .{ .foreground_color = .blue });
         defer span.deinit();
-        const copy = try span.clone();
+        const copy = try span.clone(span.allocator);
         defer copy.deinit();
 
         try std.testing.expectEqualDeep(span.style, copy.style);
@@ -191,11 +191,11 @@ pub const Line = struct {
     }
 
     /// Makes a copy of the line using the same allocator.
-    pub fn clone(self: Line) std.mem.Allocator.Error!Line {
-        var line = Line.init(self.allocator, self.alignment);
+    pub fn clone(self: Line, allocator: std.mem.Allocator) std.mem.Allocator.Error!Line {
+        var line = Line.init(allocator, self.alignment);
         errdefer line.deinit();
         for (self.span_list.items) |span| {
-            const copy = try span.clone();
+            const copy = try span.clone(allocator);
             errdefer copy.deinit();
             try line.span_list.append(copy);
         }
@@ -205,7 +205,7 @@ pub const Line = struct {
     test "clone()" {
         const line = try Line.fromString(std.testing.allocator, undefined, "content", .{ .foreground_color = .blue });
         defer line.deinit();
-        const copy = try line.clone();
+        const copy = try line.clone(line.allocator);
         defer copy.deinit();
 
         try std.testing.expectEqual(line.span_list.items.len, copy.span_list.items.len);
@@ -356,11 +356,11 @@ pub const Text = struct {
     }
 
     /// Makes a copy of the text using the same allocator.
-    pub fn clone(self: Text) std.mem.Allocator.Error!Text {
-        var text = Text.init(self.allocator);
+    pub fn clone(self: Text, allocator: std.mem.Allocator) std.mem.Allocator.Error!Text {
+        var text = Text.init(allocator);
         errdefer text.deinit();
         for (self.line_list.items) |line| {
-            const copy = try line.clone();
+            const copy = try line.clone(allocator);
             errdefer copy.deinit();
             try text.line_list.append(copy);
         }
@@ -368,14 +368,10 @@ pub const Text = struct {
     }
 
     test "clone()" {
-        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-
-        const text = try Text.initLines(std.testing.allocator, &.{try Line.fromString(allocator, .start, "content", .{ .foreground_color = .red })});
+        const text = try Text.initLines(std.testing.allocator, &.{try Line.fromString(std.testing.allocator, .start, "content", .{ .foreground_color = .red })});
         defer text.deinit();
 
-        const copy = try text.clone();
+        const copy = try text.clone(text.allocator);
         defer copy.deinit();
 
         try std.testing.expectEqual(text.line_list.items.len, copy.line_list.items.len);
@@ -455,7 +451,7 @@ pub const Paragraph = struct {
 
     /// Adjusts the paragraph dimensions to fit the given text without wrapping.
     pub fn fit(self: *Paragraph, source_text: Text) std.mem.Allocator.Error!void {
-        const text = try source_text.clone();
+        const text = try source_text.clone(self.allocator);
         errdefer text.deinit();
         const text_frames = try self.allocator.alloc(Frame, text.line_list.items.len);
         errdefer self.allocator.free(text_frames);
@@ -494,7 +490,7 @@ pub const Paragraph = struct {
         // specification here.
         _ = method;
 
-        const text = try source_text.clone();
+        const text = try source_text.clone(self.allocator);
         errdefer text.deinit();
         const text_frames = try self.allocator.alloc(Frame, text.line_list.items.len);
         errdefer self.allocator.free(text_frames);
