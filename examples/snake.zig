@@ -16,97 +16,110 @@ const Attributes = fuizon.style.Attributes;
 const Direction = struct { x: i3, y: i3 };
 const Position = struct { x: i17, y: i17 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+//
+// Port of the Signal & Slot Pattern from QT/C++
+//
 
-    //
-    // Terminal Render Environment Setup
-    //
+pub fn Signal(comptime args: anytype) type {
+    comptime for (args) |arg| {
+        if (@TypeOf(arg) != type)
+            @compileError(std.fmt.comptimePrint(
+                "expected a tuple of types, found {any}",
+                .{@TypeOf(args)},
+            ));
+    };
 
-    var buffer = std.io.bufferedWriter(std.io.getStdOut().writer());
-    const stdout = buffer.writer();
-    defer buffer.flush() catch {};
+    return struct {
+        const Self = @This();
+        const Handler: type = slot: {
+            var info = std.builtin.Type{ .Fn = undefined };
+            var params: [args.len + 1]std.builtin.Type.Fn.Param = undefined;
+            params[0].is_generic = false;
+            params[0].is_noalias = false;
+            params[0].type = ?*anyopaque;
+            for (args, 1..) |arg, i| {
+                params[i].is_generic = false;
+                params[i].is_noalias = false;
+                params[i].type = arg;
+            }
+            info.Fn.params = &params;
+            info.Fn.is_generic = false;
+            info.Fn.is_var_args = false;
+            info.Fn.return_type = anyerror!void;
+            info.Fn.calling_convention = .Unspecified;
+            break :slot @Type(info);
+        };
+        const Slot = struct {
+            receiver: ?*anyopaque,
+            handler: *const Handler,
+        };
 
-    try fuizon.backend.raw_mode.enable();
-    defer fuizon.backend.raw_mode.disable() catch {};
-    try fuizon.backend.alternate_screen.enter(stdout);
-    defer fuizon.backend.alternate_screen.leave(stdout) catch {};
-    try fuizon.backend.cursor.hide(stdout);
-    defer fuizon.backend.cursor.show(stdout) catch {};
+        allocator: std.mem.Allocator,
+        slot_list: std.ArrayList(Slot),
 
-    var renderer = try Renderer.initFullscreen(allocator, stdout);
-    defer renderer.deinit();
+        pub fn init(allocator: std.mem.Allocator) Self {
+            var signal = @as(Self, undefined);
+            signal.allocator = allocator;
+            signal.slot_list = std.ArrayList(Slot).init(allocator);
+            return signal;
+        }
 
-    try buffer.flush();
+        pub fn deinit(self: Self) void {
+            self.slot_list.deinit();
+        }
 
-    //
-    // Game
-    //
+        pub fn connect(self: *Self, receiver: anytype, handler: *const Handler) std.mem.Allocator.Error!void {
+            const anyreceiver = @as(?*anyopaque, @ptrCast(@alignCast(@constCast(receiver))));
+            try self.slot_list.append(.{ .receiver = anyreceiver, .handler = handler });
+        }
 
-    var game = try Game.initRandom(allocator, renderer.frame().area, 20);
-    defer game.deinit();
-
-    //
-    // Event Loop
-    //
-
-    while (true) {
-        GameRenderer.render(game, renderer.frame());
-        try renderer.render(stdout);
-        try buffer.flush();
-
-        if (try fuizon.backend.event.poll()) {
-            const event = try fuizon.backend.event.read();
-            switch (event) {
-                .key => switch (event.key.code) {
-                    .char => switch (event.key.code.char) {
-                        'q' => break,
-                        // zig fmt: off
-                        'h' => game.snake.redirect(.{ .x = -1, .y =  0 }),
-                        'j' => game.snake.redirect(.{ .x =  0, .y =  1 }),
-                        'k' => game.snake.redirect(.{ .x =  0, .y = -1 }),
-                        'l' => game.snake.redirect(.{ .x =  1, .y =  0 }),
-                        // zig fmt: on
-                        else => {},
-                    },
-                    else => {},
-                },
-                .resize => {
-                    game.deinit();
-                    try renderer.frame().resize(event.resize.width, event.resize.height);
-                    game = try Game.initRandom(allocator, renderer.frame().area, 20);
-                    continue;
-                },
+        pub fn disconnect(self: *Self, receiver: anytype, handler: *const Handler) void {
+            const anyreceiver = @as(?*anyopaque, @ptrCast(@alignCast(@constCast(receiver))));
+            for (self.slot_list.items, 0..) |slot, i| {
+                if (slot.receiver == anyreceiver and slot.handler == handler) {
+                    _ = self.slot_list.swapRemove(i);
+                    break;
+                }
             }
         }
 
-        try game.tick();
-        if (!game.validate())
-            break;
-
-        std.time.sleep(16 * std.time.ns_per_ms / 1);
-    }
-
-    _ = try fuizon.backend.event.read();
+        pub fn emit(self: Self, params: anytype) anyerror!void {
+            for (self.slot_list.items) |slot| {
+                try @call(
+                    .never_inline,
+                    slot.handler,
+                    .{slot.receiver} ++ params,
+                );
+            }
+        }
+    };
 }
 
-const Renderer = struct {
-    frames: [2]Frame,
+//
+// TUI Renderer
+//
 
-    pub fn init(allocator: std.mem.Allocator) Renderer {
-        var renderer: Renderer = undefined;
+const Renderer = struct {
+    allocator: std.mem.Allocator,
+    frames: [2]Frame,
+    buffer: @TypeOf(std.io.bufferedWriter(std.io.getStdOut().writer())),
+
+    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Renderer {
+        const renderer = try allocator.create(Renderer);
+        errdefer renderer.deinit();
+        renderer.allocator = allocator;
         renderer.frames[0] = Frame.init(allocator);
         renderer.frames[1] = Frame.init(allocator);
+        renderer.buffer = std.io.bufferedWriter(std.io.getStdOut().writer());
         return renderer;
     }
 
-    pub fn initFullscreen(allocator: std.mem.Allocator, writer: anytype) !Renderer {
-        var renderer = Renderer.init(allocator);
+    pub fn initFullscreen(allocator: std.mem.Allocator) !*Renderer {
+        var renderer = try Renderer.init(allocator);
         errdefer renderer.deinit();
 
-        const render_area = try fuizon.backend.area.fullscreen().render(writer);
+        const render_area = try fuizon.backend.area.fullscreen().render(renderer.writer());
+        try renderer.flush();
         const render_frame: *Frame = renderer.frame();
 
         try render_frame.resize(render_area.width, render_area.height);
@@ -115,9 +128,10 @@ const Renderer = struct {
         return renderer;
     }
 
-    pub fn deinit(self: Renderer) void {
+    pub fn deinit(self: *const Renderer) void {
         self.frames[0].deinit();
         self.frames[1].deinit();
+        self.allocator.destroy(self);
     }
 
     pub fn frame(self: anytype) switch (@TypeOf(self)) {
@@ -128,29 +142,155 @@ const Renderer = struct {
         return &self.frames[0];
     }
 
+    pub fn writer(self: *Renderer) @TypeOf(self.buffer).Writer {
+        return self.buffer.writer();
+    }
+
     pub fn save(self: *Renderer) std.mem.Allocator.Error!void {
-        self.frames[1].copy(self.frames[0]);
+        try self.frames[1].copy(self.frames[0]);
     }
 
-    pub fn render(self: Renderer, writer: anytype) !void {
-        try fuizon.backend.frame.render(writer, self.frames[0], self.frames[1]);
+    pub fn render(self: *Renderer) !void {
+        try fuizon.backend.frame.render(self.writer(), self.frames[0], self.frames[1]);
+    }
+
+    pub fn flush(self: *Renderer) !void {
+        try self.buffer.flush();
+    }
+
+    //
+    // Slots
+    //
+
+    pub fn onRenderSignal(receiver: ?*anyopaque, req: RenderRequest) anyerror!void {
+        const self = @as(*Renderer, @ptrCast(@alignCast(receiver)));
+        try req.callback(req.context, self.frame());
+        try self.render();
+        try self.save();
+        try self.flush();
     }
 };
 
-const GameRenderer = struct {
-    pub fn render(game: Game, frame: *Frame) void {
-        frame.fill(game.area, .{ .width = 1, .content = ' ', .style = .{} });
-        for (game.snake.body.items) |item| {
-            frame.index(@intCast(item.position.x + 0), @intCast(item.position.y)).style.background_color = .blue;
-            frame.index(@intCast(item.position.x + 1), @intCast(item.position.y)).style.background_color = .blue;
-        }
-        for (game.apple_list.items) |item| {
-            frame.index(@intCast(item.position.x + 0), @intCast(item.position.y)).style.background_color = .red;
-            frame.index(@intCast(item.position.x + 1), @intCast(item.position.y)).style.background_color = .red;
-        }
+const RenderRequest = struct {
+    context: ?*anyopaque,
+    callback: *const fn (?*anyopaque, frame: *Frame) anyerror!void,
+};
+
+//
+// Game View
+//
+
+const GameView = struct {
+    allocator: std.mem.Allocator,
+    model: *GameModel,
+
+    render_signal: Signal(.{RenderRequest}),
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        renderer: *Renderer,
+        model: *GameModel,
+    ) std.mem.Allocator.Error!*GameView {
+        const view = try allocator.create(GameView);
+        errdefer allocator.destroy(view);
+        view.allocator = allocator;
+        view.model = model;
+        view.render_signal = @TypeOf(view.render_signal).init(allocator);
+        errdefer view.render_signal.deinit();
+        try view.render_signal.connect(renderer, Renderer.onRenderSignal);
+        try model.update_signal.connect(view, GameView.onGameUpdateSignal);
+        return view;
+    }
+
+    pub fn deinit(self: *const GameView) void {
+        self.model.update_signal.disconnect(self, GameView.onGameUpdateSignal);
+        self.render_signal.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn render(self: *const GameView) anyerror!void {
+        try self.render_signal.emit(.{RenderRequest{
+            .context = @ptrCast(@alignCast(@constCast(self))),
+            .callback = (struct {
+                fn renderFn(context: ?*anyopaque, frame: *Frame) anyerror!void {
+                    const view = @as(*const GameView, @ptrCast(@alignCast(context)));
+                    frame.fill(view.model.game.area, .{ .width = 1, .content = ' ', .style = .{} });
+                    for (view.model.game.snake.body.items) |item| {
+                        frame.index(@intCast(item.position.x + 0), @intCast(item.position.y)).style.background_color = .blue;
+                        frame.index(@intCast(item.position.x + 1), @intCast(item.position.y)).style.background_color = .blue;
+                    }
+                    for (view.model.game.apple_list.items) |item| {
+                        frame.index(@intCast(item.position.x + 0), @intCast(item.position.y)).style.background_color = .red;
+                        frame.index(@intCast(item.position.x + 1), @intCast(item.position.y)).style.background_color = .red;
+                    }
+                }
+            }).renderFn,
+        }});
+    }
+
+    //
+    // Slots
+    //
+
+    pub fn onGameUpdateSignal(receiver: ?*anyopaque) anyerror!void {
+        return @as(*const GameView, @ptrCast(@alignCast(receiver))).render();
     }
 };
 
+//
+// Game Model
+//
+
+const GameModel = struct {
+    const Modified = struct { game: *Game };
+
+    allocator: std.mem.Allocator,
+    game: Game,
+
+    update_signal: Signal(.{}),
+
+    pub fn init(allocator: std.mem.Allocator, area: Area) std.mem.Allocator.Error!*GameModel {
+        const state = try allocator.create(GameModel);
+        errdefer allocator.destroy(state);
+        state.allocator = allocator;
+        state.game = try Game.init(allocator, area);
+        state.update_signal = @TypeOf(state.update_signal).init(allocator);
+        return state;
+    }
+
+    pub fn initRandom(
+        allocator: std.mem.Allocator,
+        area: Area,
+        napples: usize,
+    ) std.mem.Allocator.Error!*GameModel {
+        var state = try GameModel.init(allocator, area);
+        errdefer state.deinit();
+        for (0..napples) |_|
+            try state.game.apple_list.append(Apple.random(area));
+        return state;
+    }
+
+    pub fn deinit(self: *const GameModel) void {
+        self.game.deinit();
+        self.update_signal.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn resize(self: *GameModel, area: Area) std.mem.Allocator.Error!void {
+        const napples = self.game.apple_list.items.len;
+        self.game.deinit();
+        self.game = try Game.init(self.allocator, area);
+        for (0..napples) |_|
+            try self.game.apple_list.append(Apple.random(area));
+    }
+
+    pub fn update(self: GameModel) anyerror!void {
+        try self.update_signal.emit(.{});
+    }
+};
+
+//
+// Game
 //
 
 const Game = struct {
@@ -169,25 +309,10 @@ const Game = struct {
         return game;
     }
 
-    pub fn initRandom(
-        allocator: std.mem.Allocator,
-        area: Area,
-        napples: usize,
-    ) std.mem.Allocator.Error!Game {
-        var game = try Game.init(allocator, area);
-        errdefer game.deinit();
-        game.area = area;
-        for (0..napples) |_|
-            try game.apple_list.append(Apple.random(area));
-        return game;
-    }
-
-    pub fn deinit(self: Game) void {
+    pub fn deinit(self: *const Game) void {
         self.snake.deinit();
         self.apple_list.deinit();
     }
-
-    //
 
     pub fn tick(self: *Game) !void {
         self.snake.tick();
@@ -346,3 +471,79 @@ const Apple = struct {
         unreachable;
     }
 };
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    //
+    // Terminal Render Environment Setup
+    //
+
+    const renderer = try Renderer.initFullscreen(allocator);
+    defer renderer.deinit();
+    defer renderer.flush() catch {};
+
+    const writer = renderer.writer();
+
+    try fuizon.backend.raw_mode.enable();
+    defer fuizon.backend.raw_mode.disable() catch {};
+    try fuizon.backend.alternate_screen.enter(writer);
+    defer fuizon.backend.alternate_screen.leave(writer) catch {};
+    try fuizon.backend.cursor.hide(writer);
+    defer fuizon.backend.cursor.show(writer) catch {};
+
+    try renderer.flush();
+
+    //
+    // Game
+    //
+
+    const model = try GameModel.initRandom(allocator, renderer.frame().area, 20);
+    defer model.deinit();
+
+    const view = try GameView.init(allocator, renderer, model);
+    defer view.deinit();
+
+    //
+    // Event Loop
+    //
+
+    while (true) {
+        if (try fuizon.backend.event.poll()) {
+            const event = try fuizon.backend.event.read();
+            switch (event) {
+                .key => switch (event.key.code) {
+                    .char => switch (event.key.code.char) {
+                        'q' => break,
+                        // zig fmt: off
+                        'h' => model.game.snake.redirect(.{ .x = -1, .y =  0 }),
+                        'j' => model.game.snake.redirect(.{ .x =  0, .y =  1 }),
+                        'k' => model.game.snake.redirect(.{ .x =  0, .y = -1 }),
+                        'l' => model.game.snake.redirect(.{ .x =  1, .y =  0 }),
+                        // zig fmt: on
+                        else => {},
+                    },
+                    else => {},
+                },
+                .resize => {
+                    try renderer.frame().resize(event.resize.width, event.resize.height);
+                    renderer.frame().reset();
+                    try model.resize(renderer.frame().area);
+                    try model.update();
+                    continue;
+                },
+            }
+        }
+
+        try model.game.tick();
+        if (!model.game.validate())
+            break;
+        try model.update();
+
+        std.time.sleep(16 * std.time.ns_per_ms / 1);
+    }
+
+    _ = try fuizon.backend.event.read();
+}
