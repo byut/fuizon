@@ -3,6 +3,15 @@ const fuizon = @import("fuizon");
 
 const Area = fuizon.area.Area;
 
+const Layout = fuizon.layout.Layout;
+
+const Span = fuizon.widgets.text.Span;
+const Line = fuizon.widgets.text.Line;
+const Text = fuizon.widgets.text.Text;
+const Paragraph = fuizon.widgets.text.Paragraph;
+const Borders = fuizon.widgets.container.Borders;
+const Container = fuizon.widgets.container.Container;
+
 const Frame = fuizon.frame.Frame;
 const FrameCell = fuizon.frame.FrameCell;
 
@@ -104,6 +113,8 @@ const Renderer = struct {
     frames: [2]Frame,
     buffer: @TypeOf(std.io.bufferedWriter(std.io.getStdOut().writer())),
 
+    resize_signal: Signal(.{Area}),
+
     pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!*Renderer {
         const renderer = try allocator.create(Renderer);
         errdefer renderer.deinit();
@@ -111,6 +122,7 @@ const Renderer = struct {
         renderer.frames[0] = Frame.init(allocator);
         renderer.frames[1] = Frame.init(allocator);
         renderer.buffer = std.io.bufferedWriter(std.io.getStdOut().writer());
+        renderer.resize_signal = @TypeOf(renderer.resize_signal).init(allocator);
         return renderer;
     }
 
@@ -131,6 +143,7 @@ const Renderer = struct {
     pub fn deinit(self: *const Renderer) void {
         self.frames[0].deinit();
         self.frames[1].deinit();
+        self.resize_signal.deinit();
         self.allocator.destroy(self);
     }
 
@@ -177,12 +190,94 @@ const RenderRequest = struct {
 };
 
 //
+// App View
+//
+
+const AppView = struct {
+    allocator: std.mem.Allocator,
+    renderer: *Renderer,
+
+    area: Area,
+    layout: Layout,
+
+    game_view: *GameView,
+    sidebar_view: *SidebarView,
+
+    pub fn init(allocator: std.mem.Allocator, renderer: *Renderer, model: *GameModel) std.mem.Allocator.Error!*AppView {
+        const view = try allocator.create(AppView);
+        errdefer allocator.destroy(view);
+
+        view.allocator = allocator;
+
+        view.renderer = renderer;
+        try view.renderer.resize_signal.connect(view, AppView.onResizeSignal);
+
+        view.area = .{ .width = 0, .height = 0, .origin = .{ .x = 0, .y = 0 } };
+        view.layout = try Layout.init(allocator, .horizontal);
+        errdefer view.layout.deinit();
+        view.layout.append(.{ .fill = 1 }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        view.layout.append(.{ .length = 10 }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+
+        view.game_view = try GameView.init(allocator, renderer, model);
+        errdefer view.game_view.deinit();
+
+        view.sidebar_view = try SidebarView.init(allocator, renderer, model);
+        errdefer view.sidebar_view.deinit();
+
+        return view;
+    }
+
+    pub fn deinit(self: *AppView) void {
+        self.renderer.resize_signal.disconnect(self, AppView.onResizeSignal);
+
+        self.layout.deinit();
+        self.game_view.deinit();
+        self.sidebar_view.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn resize(self: *AppView, area: Area) std.mem.Allocator.Error!void {
+        self.area = area;
+        try self.layout.fit(area);
+        self.layout.refresh() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+
+        try self.game_view.resize(self.layout.areas()[0]);
+        try self.sidebar_view.resize(self.layout.areas()[1]);
+    }
+
+    pub fn render(self: AppView) anyerror!void {
+        try self.game_view.render();
+        try self.sidebar_view.render();
+    }
+
+    //
+
+    fn onResizeSignal(receiver: ?*anyopaque, new_area: Area) anyerror!void {
+        const self = @as(*AppView, @ptrCast(@alignCast(receiver)));
+        try self.resize(new_area);
+        try self.render();
+    }
+};
+
+//
 // Game View
 //
 
 const GameView = struct {
     allocator: std.mem.Allocator,
     model: *GameModel,
+
+    area: Area,
+    container: Container,
 
     render_signal: Signal(.{RenderRequest}),
 
@@ -199,6 +294,14 @@ const GameView = struct {
         errdefer view.render_signal.deinit();
         try view.render_signal.connect(renderer, Renderer.onRenderSignal);
         try model.update_signal.connect(view, GameView.onGameUpdateSignal);
+
+        view.area = .{ .width = 0, .height = 0, .origin = .{ .x = 0, .y = 0 } };
+        view.container = Container{};
+        view.container.title = "Game";
+        view.container.title_alignment = .center;
+        view.container.borders = Borders.all;
+        view.container.border_type = .thick;
+
         return view;
     }
 
@@ -208,23 +311,15 @@ const GameView = struct {
         self.allocator.destroy(self);
     }
 
+    pub fn resize(self: *GameView, area: Area) std.mem.Allocator.Error!void {
+        self.area = area;
+        try self.model.resize(self.container.inner(area));
+    }
+
     pub fn render(self: *const GameView) anyerror!void {
         try self.render_signal.emit(.{RenderRequest{
             .context = @ptrCast(@alignCast(@constCast(self))),
-            .callback = (struct {
-                fn renderFn(context: ?*anyopaque, frame: *Frame) anyerror!void {
-                    const view = @as(*const GameView, @ptrCast(@alignCast(context)));
-                    frame.fill(view.model.game.area, .{ .width = 1, .content = ' ', .style = .{} });
-                    for (view.model.game.snake.body.items) |item| {
-                        frame.index(@intCast(item.position.x + 0), @intCast(item.position.y)).style.background_color = .blue;
-                        frame.index(@intCast(item.position.x + 1), @intCast(item.position.y)).style.background_color = .blue;
-                    }
-                    for (view.model.game.apple_list.items) |item| {
-                        frame.index(@intCast(item.position.x + 0), @intCast(item.position.y)).style.background_color = .red;
-                        frame.index(@intCast(item.position.x + 1), @intCast(item.position.y)).style.background_color = .red;
-                    }
-                }
-            }).renderFn,
+            .callback = GameView.onRender,
         }});
     }
 
@@ -232,14 +327,190 @@ const GameView = struct {
     // Slots
     //
 
+    fn onRender(context: ?*anyopaque, frame: *Frame) anyerror!void {
+        const view = @as(*const GameView, @ptrCast(@alignCast(context)));
+
+        view.container.render(frame, view.area);
+        frame.fill(view.model.game.area, .{ .width = 1, .content = ' ', .style = .{} });
+
+        std.debug.assert(std.meta.eql(view.container.inner(view.area), view.model.game.area));
+
+        for (view.model.game.snake.body.items) |item| {
+            frame.index(@intCast(item.position.x + 0), @intCast(item.position.y)).style.background_color = .blue;
+            frame.index(@intCast(item.position.x + 1), @intCast(item.position.y)).style.background_color = .blue;
+        }
+        for (view.model.game.apple_list.items) |item| {
+            frame.index(@intCast(item.position.x + 0), @intCast(item.position.y)).style.background_color = .red;
+            frame.index(@intCast(item.position.x + 1), @intCast(item.position.y)).style.background_color = .red;
+        }
+    }
+
     pub fn onGameUpdateSignal(receiver: ?*anyopaque) anyerror!void {
         return @as(*const GameView, @ptrCast(@alignCast(receiver))).render();
     }
 };
 
 //
+// Sidebar View
+//
+
+const SidebarView = struct {
+    allocator: std.mem.Allocator,
+
+    area: Area,
+    layout: Layout,
+
+    score_view: *GameScoreView,
+
+    pub fn init(allocator: std.mem.Allocator, renderer: *Renderer, model: *GameModel) std.mem.Allocator.Error!*SidebarView {
+        var view = try allocator.create(SidebarView);
+        errdefer view.deinit();
+
+        view.allocator = allocator;
+
+        view.area = .{ .width = 0, .height = 0, .origin = .{ .x = 0, .y = 0 } };
+        view.layout = try Layout.init(allocator, .vertical);
+        errdefer view.layout.deinit();
+        view.layout.append(.{ .length = 0 }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        view.layout.append(.{ .fill = 1 }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+
+        view.score_view = try GameScoreView.init(allocator, renderer, model);
+        errdefer view.score_view.deinit();
+
+        return view;
+    }
+
+    pub fn deinit(self: *SidebarView) void {
+        self.layout.deinit();
+        self.score_view.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn resize(self: *SidebarView, area: Area) std.mem.Allocator.Error!void {
+        try self.score_view.wrap(area.width);
+        try self.layout.remove(0);
+        self.layout.insert(0, .{ .length = self.score_view.paragraph.height() }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+        try self.layout.fit(area);
+        self.layout.refresh() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+
+        try self.score_view.resize(self.layout.areas()[0]);
+    }
+
+    pub fn render(self: *const SidebarView) anyerror!void {
+        try self.score_view.render();
+    }
+};
+
+//
+// Game Score View
+//
+const GameScoreView = struct {
+    allocator: std.mem.Allocator,
+    model: *GameModel,
+
+    area: Area,
+    paragraph: Paragraph,
+
+    render_signal: Signal(.{RenderRequest}),
+
+    pub fn init(allocator: std.mem.Allocator, renderer: *Renderer, model: *GameModel) std.mem.Allocator.Error!*GameScoreView {
+        var view = try allocator.create(GameScoreView);
+        errdefer allocator.destroy(view);
+
+        view.allocator = allocator;
+
+        view.model = model;
+        try view.model.update_signal.connect(view, GameScoreView.onGameUpdateSignal);
+        errdefer view.model.update_signal.disconnect(view, GameScoreView.onGameUpdateSignal);
+
+        view.area = .{ .width = 0, .height = 0, .origin = .{ .x = 0, .y = 0 } };
+
+        view.paragraph = Paragraph.init(allocator);
+        view.paragraph.container.title = "Score";
+        view.paragraph.container.title_alignment = .center;
+        view.paragraph.container.borders = Borders.all;
+        view.paragraph.container.border_type = .thick;
+        view.paragraph.container.margin_right = 1;
+        view.paragraph.container.margin_left = 1;
+
+        view.render_signal = @TypeOf(view.render_signal).init(allocator);
+        try view.render_signal.connect(renderer, Renderer.onRenderSignal);
+
+        return view;
+    }
+
+    pub fn deinit(self: *const GameScoreView) void {
+        self.model.update_signal.disconnect(self, GameScoreView.onGameUpdateSignal);
+        self.render_signal.deinit();
+        self.paragraph.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn wrap(self: *GameScoreView, width: u16) std.mem.Allocator.Error!void {
+        const score_string = try std.fmt.allocPrint(self.allocator, "{d}", .{self.model.game.score});
+        defer self.allocator.free(score_string);
+
+        const text = try Text.initLines(self.allocator, &.{
+            try Line.fromString(self.allocator, .end, score_string, .{}),
+        });
+        defer text.deinit();
+
+        try self.paragraph.wrap(
+            text,
+            self.paragraph.container.innerWidth(width),
+            .character,
+        );
+    }
+
+    pub fn resize(self: *GameScoreView, area: Area) std.mem.Allocator.Error!void {
+        self.area = area;
+    }
+
+    pub fn fetch(self: *GameScoreView) std.mem.Allocator.Error!void {
+        try self.wrap(self.area.width);
+    }
+
+    pub fn render(self: *const GameScoreView) anyerror!void {
+        try self.render_signal.emit(.{RenderRequest{
+            .context = @ptrCast(@alignCast(@constCast(self))),
+            .callback = GameScoreView.onRender,
+        }});
+    }
+
+    //
+    // Slots
+    //
+
+    pub fn onRender(context: ?*anyopaque, frame: *Frame) anyerror!void {
+        const view = @as(*const GameScoreView, @ptrCast(@alignCast(context)));
+        view.paragraph.render(frame, view.area);
+    }
+
+    pub fn onGameUpdateSignal(receiver: ?*anyopaque) anyerror!void {
+        // zig fmt: off
+        try @as(*GameScoreView,       @ptrCast(@alignCast(receiver))).fetch();
+        try @as(*const GameScoreView, @ptrCast(@alignCast(receiver))).render();
+        // zig fmt: on
+    }
+};
+
+//
 // Game Model
 //
+
+const APPLES: usize = 20;
 
 const GameModel = struct {
     const Modified = struct { game: *Game };
@@ -258,14 +529,10 @@ const GameModel = struct {
         return state;
     }
 
-    pub fn initRandom(
-        allocator: std.mem.Allocator,
-        area: Area,
-        napples: usize,
-    ) std.mem.Allocator.Error!*GameModel {
+    pub fn initRandom(allocator: std.mem.Allocator, area: Area) std.mem.Allocator.Error!*GameModel {
         var state = try GameModel.init(allocator, area);
         errdefer state.deinit();
-        for (0..napples) |_|
+        for (0..APPLES) |_|
             try state.game.apple_list.append(Apple.random(area));
         return state;
     }
@@ -277,10 +544,9 @@ const GameModel = struct {
     }
 
     pub fn resize(self: *GameModel, area: Area) std.mem.Allocator.Error!void {
-        const napples = self.game.apple_list.items.len;
         self.game.deinit();
         self.game = try Game.init(self.allocator, area);
-        for (0..napples) |_|
+        for (0..APPLES) |_|
             try self.game.apple_list.append(Apple.random(area));
     }
 
@@ -500,15 +766,26 @@ pub fn main() !void {
     // Game
     //
 
-    const model = try GameModel.initRandom(allocator, renderer.frame().area, 20);
+    const model = try GameModel.init(allocator, Area{
+        .width = 0,
+        .height = 0,
+        .origin = .{ .x = 0, .y = 0 },
+    });
     defer model.deinit();
 
-    const view = try GameView.init(allocator, renderer, model);
+    //
+    // View
+    //
+
+    const view = try AppView.init(allocator, renderer, model);
     defer view.deinit();
 
     //
     // Event Loop
     //
+
+    // Ensure the views get their areas
+    try renderer.resize_signal.emit(.{renderer.frame().area});
 
     while (true) {
         if (try fuizon.backend.event.poll()) {
@@ -530,8 +807,7 @@ pub fn main() !void {
                 .resize => {
                     try renderer.frame().resize(event.resize.width, event.resize.height);
                     renderer.frame().reset();
-                    try model.resize(renderer.frame().area);
-                    try model.update();
+                    try renderer.resize_signal.emit(.{renderer.frame().area});
                     continue;
                 },
             }
