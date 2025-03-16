@@ -420,31 +420,40 @@ pub const Paragraph = struct {
 
     /// Returns the width required to fully render the paragraph.
     pub fn width(self: Paragraph) u16 {
-        var max_width: u16 = 0;
-        for (self.text_frames) |text_frame| {
-            if (text_frame.area.width > max_width)
-                max_width = text_frame.area.width;
-        }
-
         // zig fmt: off
-        return max_width
+        return self.contentWidth()
             + self.container.margin_left + self.container.margin_right
             + (if (self.container.borders.contain(&.{.left}))  @as(u16, 1) else @as(u16, 0))
             + (if (self.container.borders.contain(&.{.right})) @as(u16, 1) else @as(u16, 0));
         // zig fmt: on
     }
 
+    /// Returns the content width of the paragraph.
+    pub fn contentWidth(self: Paragraph) u16 {
+        var max_width: u16 = 0;
+        for (self.text_frames) |text_frame| {
+            if (text_frame.area.width > max_width)
+                max_width = text_frame.area.width;
+        }
+        return max_width;
+    }
+
     /// Returns the height required to fully render the paragraph.
     pub fn height(self: Paragraph) u16 {
-        var h: u16 = 0;
-        for (self.text_frames) |text_frame|
-            h += text_frame.area.height;
         // zig fmt: off
-        return h
+        return self.contentHeight()
             + self.container.margin_top + self.container.margin_bottom
             + (if (self.container.borders.contain(&.{.top}))    @as(u16, 1) else @as(u16, 0))
             + (if (self.container.borders.contain(&.{.bottom})) @as(u16, 1) else @as(u16, 0));
         // zig fmt: on
+    }
+
+    /// Returns the content height of the paragraph.
+    pub fn contentHeight(self: Paragraph) u16 {
+        var h: u16 = 0;
+        for (self.text_frames) |text_frame|
+            h += text_frame.area.height;
+        return h;
     }
 
     //
