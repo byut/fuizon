@@ -806,7 +806,10 @@ pub fn main() !void {
                 },
                 .resize => {
                     try renderer.frame().resize(event.resize.width, event.resize.height);
+                    renderer.frames[1].reset();
                     renderer.frame().reset();
+                    try fuizon.backend.screen.clearAll(writer);
+                    try renderer.flush();
                     try renderer.resize_signal.emit(.{renderer.frame().area});
                     continue;
                 },
