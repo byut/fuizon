@@ -690,10 +690,10 @@ const Snake = struct {
 
         for (self.body.items) |item| {
             // zig fmt: off
-            if (item.position.x <  game.area.left()    or
-                item.position.x >= game.area.right()   or
-                item.position.y <  game.area.top()     or
-                item.position.y >= game.area.bottom()) return false;
+            if (item.position.x <  game.area.left()       or
+                item.position.x >= game.area.right() -| 1 or
+                item.position.y <  game.area.top()        or
+                item.position.y >= game.area.bottom())    return false;
             // zig fmt: on
         }
 
@@ -723,7 +723,7 @@ const Apple = struct {
     position: Position,
 
     pub fn random(area: Area) Apple {
-        const x = randomEvenInRangeLessThan(i17, 0, @intCast(area.width)) + area.left();
+        const x = randomEvenInRangeLessThan(i17, 0, @intCast(area.width -| 1)) + area.left();
         const y = randomEvenInRangeLessThan(i17, 0, @intCast(area.height)) + area.top();
 
         return .{ .position = .{ .x = x, .y = y } };
